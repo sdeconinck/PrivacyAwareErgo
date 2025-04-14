@@ -1,0 +1,3 @@
+ultralytics
+piq
+torchvision==0.18
