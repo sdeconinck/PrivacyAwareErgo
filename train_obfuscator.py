@@ -25,6 +25,8 @@ import numpy as np
 from piq import ssim, psnr, vif_p
 import random
 import pickle
+from ultralytics.utils import IterableSimpleNamespace
+from ultralytics.data.augment import v8_transforms, Format
 
 # ensure reproducibility
 torch.backends.cudnn.deterministic = True
@@ -38,8 +40,7 @@ if __name__ == "__main__":
     # parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, default="/project_ghent/Ergo/configs/keypoints_final2.yaml")
-    parser.add_argument("--pose_model", type=str, default="yolov8x-pose.pt",
-                        help='which ultralytics pose model to use, we recommend 8 as 11 seems more unstable (not all weights can be loaded)')
+    parser.add_argument("--pose_model", type=str, default="yolov8x-pose.pt")
     parser.add_argument("--num_epochs", type=int, default=20)
     parser.add_argument("--batch_size_train", type=int, default=8)
     parser.add_argument("--batch_size_val", type=int, default=8)
@@ -48,28 +49,28 @@ if __name__ == "__main__":
     parser.add_argument("--save_path_obfuscator", type=str, default="obfuscator.pth")
     parser.add_argument("--save_path_deobfuscator", type=str, default="deobfuscator.pth")
 
-    # obfuscator architecture hyperparameters
+    # obfuscator hyperparameters
     parser.add_argument("--internal_expansion", type=int, default=6)
     parser.add_argument("--first_n_filters", type=int, default=32)
-    parser.add_argument("--upscale_factor", nargs=3, type=int, default=[2, 2, 4])
+    parser.add_argument("--upscale_factor", nargs=3, type=int, default=[2, 2, 2])
     parser.add_argument('--random_mapping', action='store_true', default=False,
                         help='Use to use the random map variant of the obfuscator')
+    parser.add_argument("--noise_type", type=str, default='uniform')
 
-    parser.add_argument("--reconstruction_weight", type=float, default=20, help='Weight of the reconstruction factor in the loss function')
+    parser.add_argument("--reconstruction_weight", type=float, default=20)
+    parser.add_argument("--random_map_weight", type=int, default=1)
+    parser.add_argument('--finetune', action='store_true', default=False,
+                        help='Use to finetune an existing obfuscator and deobfuscator, be sure to specify them in load_path_(de)obfuscator')
     parser.add_argument('--weight_decay_obfuscator', type=float, default=0.01)
     parser.add_argument('--weight_decay_deobfuscator', type=float, default=0.01)
 
-    # use when starting from a trained model
-    parser.add_argument('--finetune', action='store_true', default=False,
-                        help='Use to finetune an existing obfuscator and deobfuscator, be sure to specify them in load_path_(de)obfuscator')
     parser.add_argument('--load_path_obfuscator', type=str, default='models/obfuscator/rand_map_coco.pt')
     parser.add_argument('--load_path_deobfuscator', type=str, default='models/deobfuscator/rand_map_coco.pt')
 
     parser.add_argument('--augment_train_data', action='store_true', default=False,
                         help='Wether to use the yolo data augmentations for training models')
-    parser.add_argument('--nowandb', action='store_true', default=False,
-                        help="Use when you don't want to log to weights and biases")
-    parser.add_argument('--wandb_project', default='privacyErgo', help='Wandb project name')
+    parser.add_argument('--nowandb', action='store_true', default=False)
+
 
     args = parser.parse_args()
     print(args)
@@ -78,7 +79,7 @@ if __name__ == "__main__":
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-    wandb.init(project=args.wandb_project, config=args, mode='disabled' if args.nowandb else 'online')
+    wandb.init(project="privacyErgo", config=args, mode='disabled' if args.nowandb else 'online')
 
     # load in YOLO model
     model = YOLO(args.pose_model.replace("pt", "yaml")).load(args.pose_model)
@@ -91,20 +92,22 @@ if __name__ == "__main__":
     conf = yaml.safe_load(Path(args.config_path).read_text())
     images_path_train = os.path.join(conf["path"], conf["train"])
     images_path_val = os.path.join(conf["path"], conf["val"])
+
     dataset_train = YOLODataset(img_path=Path(images_path_train), data=conf, task="pose",
                                 augment=args.augment_train_data)
+
     dataset_train_eval = YOLODataset(img_path=Path(images_path_train), data=conf, task="pose", augment=False)
     dataset_val = YOLODataset(img_path=Path(images_path_val), data=conf, task="pose", augment=False)
 
-    # use a datasampler
-    sampler = None
+
+    sampler  = None
     dataloader = build_dataloader(dataset_train, batch=args.batch_size_train, workers=2, sampler=sampler, shuffle=True)
     dataloader_val = build_dataloader(dataset_val, batch=args.batch_size_val, workers=2, shuffle=True)
     dataloader_train_eval = build_dataloader(dataset_train_eval, batch=args.batch_size_val, workers=2, shuffle=True)
 
     # load in obfuscator and deobfuscator model
     obfuscator = AutoEncoder(internal_expansion=args.internal_expansion, first_n_filters=args.first_n_filters,
-                             upscale_factor=args.upscale_factor, random_map=args.random_mapping)
+                             upscale_factor=args.upscale_factor, random_map=args.random_mapping, noise_type=args.noise_type)
     deobfuscator = AutoEncoder(internal_expansion=6, first_n_filters=24, upscale_factor=[2, 2, 2])
     obfuscator = obfuscator.to(device)
     deobfuscator = deobfuscator.to(device)
@@ -126,6 +129,9 @@ if __name__ == "__main__":
     train_validator = PoseValidator(args=args_valid, dataloader=dataloader_train_eval)
     train_validator.data = check_det_dataset(train_validator.args.data)
     train_validator.device = device
+
+    # args = dict(model=pose_model, source=ASSETS)
+    # predictor = PosePredictor(overrides=args)
 
     pose_loss = ultralytics.utils.loss.v8PoseLoss(model.model)
     pose_loss.hyp = dotdict(pose_loss.hyp)
@@ -183,13 +189,12 @@ if __name__ == "__main__":
                     # print(loss.sum())
 
                 reconstruction_loss = reconstruction_criterion(reconstructed,
-                                                               data["img"]) * args.reconstruction_weight + reg_loss
+                                                               data["img"]) * args.reconstruction_weight +  args.random_map_weight * reg_loss
                 deobfuscator_loss = reconstruction_loss
 
             if epoch % 2 == 0:
                 # train the obfuscator
                 obfuscator_loss = loss[0].sum() - reconstruction_loss
-                print(obfuscator_loss)
                 scaler.scale(obfuscator_loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
@@ -201,7 +206,7 @@ if __name__ == "__main__":
 
             if i % 10 == 0:
                 wandb.log({"loss_pose": loss[0].sum().item(), "loss_reconstruction": reconstruction_loss.item(),
-                           "obfuscator_loss": obfuscator_loss.item(), "deobfuscator_loss": deobfuscator_loss.item()})
+                           "obfuscator_loss": obfuscator_loss.item(), "deobfuscator_loss": deobfuscator_loss.item(), 'reg_loss': reg_loss.item()})
         # advance schedulers
         scheduler_obfuscator.step()
         scheduler_deobfuscator.step()

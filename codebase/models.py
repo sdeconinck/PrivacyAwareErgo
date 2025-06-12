@@ -8,7 +8,7 @@ class AutoEncoder(nn.Module):
         AutoEncoder class, based on the MobileNet architecture
     """
 
-    def __init__(self, internal_expansion=6, first_n_filters=32, transforms=None, upscale_factor=(2,2,2), random_map=False):
+    def __init__(self, internal_expansion=6, first_n_filters=32, transforms=None, upscale_factor=(2,2,2), random_map=False, noise_type='uniform'):
         """Constructor
 
         Args:
@@ -36,6 +36,7 @@ class AutoEncoder(nn.Module):
 
         # sigmoid to revert values to the [0,1] scale for processing with the object detection model
         self.sigmoid = nn.Sigmoid()
+        self.noise_type = noise_type
 
     def forward(self, x):
         if self.transforms != None:
@@ -50,15 +51,16 @@ class AutoEncoder(nn.Module):
             img = out[:,0:3,:,:]
             random_map = out[:,3:,:,:]
 
-            random_img = torch.rand_like(img)
-            random_img = img + random_img * random_map
+            if self.noise_type == 'gaussian':
+                random_img = torch.randn_like(img)
+            elif self.noise_type == 'uniform':
+                random_img = torch.rand_like(img)
+
+            random_img = img + random_img * random_map 
             return self.sigmoid(random_img), random_map
 
         return out
 
-
-
-# for the mobilenet encoder
 class MobilenetV2Block(nn.Module):
     '''expand + depthwise + pointwise'''
 
@@ -91,77 +93,3 @@ class MobilenetV2Block(nn.Module):
         out = self.bn3(self.conv3(out))
         return out
 
-
-# code from https://github.com/milesial/Pytorch-UNet for the UNet network
-class DoubleConv(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
-
-    def __init__(self, in_channels, out_channels, mid_channels=None):
-        super().__init__()
-        if not mid_channels:
-            mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        return self.double_conv(x)
-
-
-class Down(nn.Module):
-    """Downscaling with maxpool then double conv"""
-
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels)
-        )
-
-    def forward(self, x):
-        return self.maxpool_conv(x)
-
-
-class Up(nn.Module):
-    """Upscaling then double conv"""
-
-    def __init__(self, in_channels, out_channels, bilinear=True):
-        super().__init__()
-
-        # if bilinear, use the normal convolutions to reduce the number of channels
-        if bilinear:
-            self.up = nn.Upsample(
-                scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
-        else:
-            self.up = nn.ConvTranspose2d(
-                in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        # input is CHW
-        diffY = x2.size()[2] - x1.size()[2]
-        diffX = x2.size()[3] - x1.size()[3]
-
-        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
-                        diffY // 2, diffY - diffY // 2])
-        # if you have padding issues, see
-        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
-        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-
-class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(OutConv, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-
-    def forward(self, x):
-        return self.conv(x)
