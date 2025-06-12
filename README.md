@@ -1,3 +1,7 @@
+# Source code for the paper Enabling Privacy-Aware AI-Based Ergonomic Analysis
+
+To be completed
+
 ## Prepare dataset
 
 The `train_obfuscator.py` script expects dataset in the yolo format (indicated by a .yaml file, more info on the [ultralytics documentation](https://docs.ultralytics.com/datasets/pose/#ultralytics-yolo-format)).
